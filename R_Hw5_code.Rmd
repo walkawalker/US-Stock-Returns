@@ -1,0 +1,419 @@
+---
+title: "R_HW5_Code"
+author: "Walker Hills"
+date: "9/30/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(corrplot)
+library(Hmisc)
+library(psych)
+library(tidyverse)
+library(tidyquant)
+library(timetk)
+library(readxl)
+library(plotly)
+library(scales)
+library(fredr)
+library(broom)
+library(treasuryTR)
+library(modeltime)
+library(tidymodels)
+library(ppsr)
+library(fredr)
+library(Quandl)
+library(riingo)
+library(config)
+library(here)
+library(httr)
+library(jsonlite)
+library(patchwork)
+library(cowplot)
+library(gt)
+library(english)
+library(gtsummary)
+library(vtable)
+library(quantmod)
+library(reshape2)
+library(BBmisc)
+library(haven)
+```
+
+
+
+```{r get sas data}
+sampledatamonthly <- read_sas("Q:\\Data-ReadOnly\\CRSP\\msf_new2.sas7bdat") %>%
+  select('DATE', 'PERMNO', 'SHRCD', 'HEXCD', 'HSICCD', 'PRC', 'BID', 'ASK', 'RET','RETX', 'SHROUT', 'VWRETD')
+```
+
+```{r get CPI}
+fredr_set_key("934ff2bda973318f207c642650032b62")
+CPI_data <- tq_get("CPIAUCSL", get = "economic.data", from = "2010-01-01", to = "2010-12-31")
+avg2010PriceCPI <- AVERAGE(CPI_data$price)
+CPI_data <- tq_get("CPIAUCSL", get = "economic.data", from = "1925-01-01")%>%
+  mutate(ratio = avg2010PriceCPI/price)%>%
+  select(date,ratio)%>%
+  rename(DATE = date)%>%
+  mutate(DATE = as.yearmon(DATE))
+```
+
+```{r make edits to data}
+testdata <- sampledatamonthly %>%
+  mutate(DATE = as.yearmon(DATE))%>%
+  filter(SHRCD == 10 | SHRCD == 11)%>%
+  left_join(y= CPI_data)%>%
+  mutate(HEXCD = case_when(HEXCD == 1 ~"NYSE",
+                                HEXCD == 2 ~"NYSE MKT", 
+                                HEXCD == 3 ~"NASDAQ",
+                                HEXCD == 4 ~"Arca",
+                                HEXCD == 5 ~"Other Exchange"))%>%
+  mutate(HSICCD = case_when((HSICCD >= 1 & HSICCD <= 999) ~"Agriculture, Forestry and Fishing",
+                                (HSICCD >= 1000 & HSICCD <= 1499) ~"Mining",
+                                (HSICCD >= 1500 & HSICCD <= 1799) ~"Construction",
+                                (HSICCD >= 2000 & HSICCD <= 3999) ~"Manufacturing",
+                                (HSICCD >= 4000 & HSICCD <= 4999) ~"Transportation and other Utilities",
+                                (HSICCD >= 5000 & HSICCD <= 5199) ~"Wholesale Trade",
+                                (HSICCD >= 5200 & HSICCD <= 5999) ~"Retail Trade",
+                                (HSICCD >= 6000 & HSICCD <= 6799) ~"Finance, Insurance and Real Estate", 
+                                (HSICCD >= 7000 & HSICCD <= 8999) ~"Services",
+                                (HSICCD >= 9000 & HSICCD <= 9999) ~"Public Administration"))%>%
+  mutate(MKTCAP = abs(PRC)*SHROUT,
+         MKTCAP2010Dollars = abs(PRC)*ratio * SHROUT
+         )%>%
+  mutate(DATE = as.Date(DATE))
+
+```
+```{r format string}
+exchange_data <- testdata%>%
+  select(DATE, PERMNO, HEXCD, MKTCAP2010Dollars)
+industry_data <- testdata%>%
+  select(DATE, PERMNO, HSICCD, MKTCAP2010Dollars)
+```
+```{r plot by exchange}
+exchange_data%>%
+  filter(DATE >= as.Date("1925-01-01") & DATE <= as.Date("2019-12-31"))%>%
+  filter(MKTCAP2010Dollars > 0)%>%
+  group_by(DATE)%>%
+  count(HEXCD)%>%
+  ggplot(aes(x=DATE, y=  n, color=HEXCD))+
+  geom_line() +
+  labs(x = "Dates", y = "Market Cap ($ 2010)", title = "Market Capitalization by Exchange in 2010 Dollars")+
+   theme(plot.title = element_text(hjust = 0.5))+
+            theme(legend.position = "bottom")+
+  facet_wrap(~HEXCD)
+
+```
+```{r plot by industry}
+industry_data%>%
+  filter(DATE >= as.Date("1925-01-01") & DATE <= as.Date("2019-12-31"))%>%
+  filter(MKTCAP2010Dollars > 0)%>%
+  ggplot(aes(x=DATE, y=  MKTCAP2010Dollars, color=HSICCD))+
+  geom_line() +
+  labs(x = "Dates", y = "Market Cap ($ 2010)", title = "Market Capitalization by Industry in 2010 Dollars")+
+   theme(plot.title = element_text(hjust = 0.5))+
+  theme(legend.position = "none")+
+  facet_wrap(~str_wrap(HSICCD, width = 20))
+
+
+
+```
+
+```{r excess returns}
+#here::here()
+riskfreereturn <- read.csv("F-F_Research_Data_Factors.csv", skip = 3, nrows = 1142)%>%
+  rename(DATE = X)%>%
+  select(DATE, Mkt.RF)%>%
+  mutate(DATE = as.Date(paste0(as.character(DATE), '01'), format='%Y%m%d'))
+
+testdata <- testdata%>%
+  left_join(y=riskfreereturn)%>%
+  mutate(excessreturn = RET - Mkt.RF)%>%
+  mutate(excessreturnsVWRETD = VWRETD - Mkt.RF)%>%
+  mutate(logexcessreturns = log(1+excessreturnsVWRETD))
+
+excessreturndata <- testdata%>%
+  select(DATE, excessreturn)
+logexcessreturndata <- testdata%>%
+  select(DATE, excessreturnsVWRETD, logexcessreturns)%>%
+  na.omit()
+
+#cummulativereturndata <- testdata%>%
+ # cumsum(excessreturnsVWRETD)%>%
+  #cumsum(logexcessreturns)%>%
+  #group_by(PERMNO)%>%
+  #select(DATE, PERMNO, excessreturnsVWRETD, logexcessreturns)
+```
+```{r call stats}
+stattableexcess1925 <- summarystatsRf(excessreturndata$excessreturn, excessreturndata$DATE, excessreturndata)
+stattableexcess1963 <- summarystatsRf(excessreturndata$excessreturn, excessreturndata$DATE, excessreturndata)%>%
+  filter(DATE >= as.Date("1963-01-01"))
+
+stattableexcessVWRETD1925 <- summarystatsRf(logexcessreturndata$excessreturnsVWRETD, logexcessreturndata$DATE, logexcessreturndata)
+stattableexcessVWRETD1963 <- summarystatsRf(logexcessreturndata$excessreturnsVWRETD, logexcessreturndata$DATE, logexcessreturndata)%>%
+  filter(DATE >= as.Date("1963-01-01"))
+
+stattableexcesslogVW1925 <- summarystatsRf(logexcessreturndata$logexcessreturns, logexcessreturndata$DATE, logexcessreturndata)
+stattableexcesslogVW1963 <- summarystatsRf(logexcessreturndata$logexcessreturns, logexcessreturndata$DATE, logexcessreturndata)%>%
+  filter(DATE >= as.Date("1963-01-01"))
+
+stattableexcessCSVW1925 <- summarystatsRf(cumsum(logexcessreturndata$excessreturnsVWRETD), logexcessreturndata$DATE, logexcessreturndata)
+stattableexcessCSVW1963 <- summarystatsRf(cumsum(logexcessreturndata$excessreturnsVWRETD), logexcessreturndata$DATE, logexcessreturndata)%>%
+  filter(DATE >= as.Date("1963-01-01"))
+
+stattableexcessCSlog1925 <- summarystatsRf(cumsum(logexcessreturndata$logexcessreturns), logexcessreturndata$DATE, logexcessreturndata)
+stattableexcessCSlog1963 <- summarystatsRf(cumsum(logexcessreturndata$logexcessreturns), logexcessreturndata$DATE, logexcessreturndata)%>%
+  filter(DATE >= as.Date("1963-01-01"))
+
+```
+```{r plot graph}
+
+stattableexcess1925%>%
+  ggplot()+
+  geom_line(aes(x = DATE, y = `average`, color ="average"))+
+  geom_line(aes(x = DATE, y = `SD`, color = "SD"))+
+  scale_color_manual(name = "Statistics", values = c("average"="hotpink", "SD"="steelblue"))+
+  labs(x = "Dates", y = "Values", title = "Average/SD of Excess Returns since 1925")+
+  theme(plot.title = element_text(hjust = 0.5))+
+            theme(legend.position = "bottom")
+  
+stattableexcess1963%>%
+  ggplot()+
+  geom_line(aes(x = DATE, y = `average`, color ="average"))+
+  geom_line(aes(x = DATE, y = `SD`, color = "SD"))+
+  scale_color_manual(name = "Statistics", values = c("average"="hotpink", "SD"="steelblue"))+
+  labs(x = "Dates", y = "Values", title = "Average/SD of Excess Returns since 1963")+
+  theme(plot.title = element_text(hjust = 0.5))+
+            theme(legend.position = "bottom")
+  
+
+stattableexcessVWRETD1925%>%
+  ggplot()+
+  geom_line(aes(x = DATE, y = `average`, color ="average"))+
+  geom_line(aes(x = DATE, y = `SD`, color = "SD"))+
+  scale_color_manual(name = "Statistics", values = c("average"="hotpink", "SD"="steelblue"))+
+  labs(x = "Dates", y = "Values", title = "Average/SD of Excess Returns on Value-Weighted Portfolio since 1925")+
+  theme(plot.title = element_text(hjust = 0.5))+
+            theme(legend.position = "bottom")
+  
+stattableexcessVWRETD1963%>%
+  ggplot()+
+  geom_line(aes(x = DATE, y = `average`, color ="average"))+
+  geom_line(aes(x = DATE, y = `SD`, color = "SD"))+
+  scale_color_manual(name = "Statistics", values = c("average"="hotpink", "SD"="steelblue"))+
+  labs(x = "Dates", y = "Values", title = "Average/SD of Excess Returns on Value-Weighted Portfolio since 1963")+
+  theme(plot.title = element_text(hjust = 0.5))+
+            theme(legend.position = "bottom")
+
+stattableexcesslogVW1925%>%
+  ggplot()+
+  geom_line(aes(x = DATE, y = `average`, color ="average"))+
+  geom_line(aes(x = DATE, y = `SD`, color = "SD"))+
+  scale_color_manual(name = "Statistics", values = c("average"="hotpink", "SD"="steelblue"))+
+  labs(x = "Dates", y = "Log Values", title = "Average/SD of Excess Returns on Value-Weighted Portfolio since 1925")+
+  theme(plot.title = element_text(hjust = 0.5))+
+            theme(legend.position = "bottom")
+  
+stattableexcesslogVW1963%>%
+  ggplot()+
+  geom_line(aes(x = DATE, y = `average`, color ="average"))+
+  geom_line(aes(x = DATE, y = `SD`, color = "SD"))+
+  scale_color_manual(name = "Statistics", values = c("average"="hotpink", "SD"="steelblue"))+
+  labs(x = "Dates", y = "Log Values", title = "Average/SD of Excess Returns on Value-Weighted Portfolio since 1963")+
+  theme(plot.title = element_text(hjust = 0.5))+
+            theme(legend.position = "bottom")
+
+stattableexcessCSVW1925%>%
+  ggplot()+
+  geom_line(aes(x = DATE, y = `average`, color ="average"))+
+  geom_line(aes(x = DATE, y = `SD`, color = "SD"))+
+  scale_color_manual(name = "Statistics", values = c("average"="hotpink", "SD"="steelblue"))+
+  labs(x = "Dates", y = "Values", title = "Average/SD of Excess Returns on Value-Weighted Portfolio since 1925")+
+  theme(plot.title = element_text(hjust = 0.5))+
+            theme(legend.position = "bottom")
+  
+stattableexcessCSVW1963%>%
+  ggplot()+
+  geom_line(aes(x = DATE, y = `average`, color ="average"))+
+  geom_line(aes(x = DATE, y = `SD`, color = "SD"))+
+  scale_color_manual(name = "Statistics", values = c("average"="hotpink", "SD"="steelblue"))+
+  labs(x = "Dates", y = "Values", title = str_wrap("Average/SD of Cummulative Excess Returns on Value-Weighted Portfolio since 1963",width = 30))+
+  theme(plot.title = element_text(hjust = 0.5))+
+            theme(legend.position = "bottom")
+
+stattableexcessCSlog1925%>%
+  ggplot()+
+  geom_line(aes(x = DATE, y = `average`, color ="average"))+
+  geom_line(aes(x = DATE, y = `SD`, color = "SD"))+
+  scale_color_manual(name = "Statistics", values = c("average"="hotpink", "SD"="steelblue"))+
+  labs(x = "Dates", y = "Log Values", title = str_wrap("Average/SD of Cummulative Excess Returns on Value-Weighted Portfolio since 1925",width = 30))+
+  theme(plot.title = element_text(hjust = 0.5))+
+            theme(legend.position = "bottom")
+  
+stattableexcessCSlog1963%>%
+  ggplot()+
+  geom_line(aes(x = DATE, y = `average`, color ="average"))+
+  geom_line(aes(x = DATE, y = `SD`, color = "SD"))+
+  scale_color_manual(name = "Statistics", values = c("average"="hotpink", "SD"="steelblue"))+
+  labs(x = "Dates", y = "Log Values", title = str_wrap("Average/SD of Cummulative Excess Returns on Value-Weighted Portfolio since 1963", width =30))+
+  theme(plot.title = element_text(hjust = 0.5))+
+            theme(legend.position = "bottom")
+```
+```{r summary stats for excess returns}
+summarystatsRf <- function(exr, da, df){
+ aggregate(exr ~ da, df, length)%>%
+  rename(N = exr)%>%
+  left_join(aggregate(exr ~ da, df, mean))%>%
+    rename(average = exr)%>%
+  left_join(aggregate(exr ~ da, df, sd))%>%
+    rename(SD = exr)%>%
+    left_join(aggregate(exr ~ da, df, skewness))%>%
+    rename(Skewness = exr)%>%
+    left_join(aggregate(exr ~ da, df, kurtosis))%>%
+    rename(Kurtosis = exr)%>%
+    left_join(aggregate(exr ~ da, df, min))%>%
+    rename(MinVal = exr)%>%
+    left_join(aggregate(exr ~ da, df, max))%>%
+    rename(MaxVal = exr)%>%
+    left_join(aggregate(exr ~ da, df, FUN = 'quantile', probs = .01, na.rm = TRUE))%>%
+    rename(Q.01 = exr)%>%
+    left_join(aggregate(exr ~ da, df, FUN = 'quantile', probs = .05, na.rm = TRUE))%>%
+    rename(Q.05 = exr)%>%
+    left_join(aggregate(exr ~ da, df, FUN = 'quantile', probs = .25, na.rm = TRUE))%>%
+    rename(Q.25 = exr)%>%
+    left_join(aggregate(exr ~ da, df, median))%>%
+    rename(P50 = exr)%>%
+    left_join(aggregate(exr ~ da, df, FUN = 'quantile', probs = .75, na.rm = TRUE))%>%
+    rename(Q.75 = exr)%>%
+    left_join(aggregate(exr ~ da, df, FUN = 'quantile', probs = .95, na.rm = TRUE))%>%
+    rename(Q.95 = exr)%>%
+        left_join(aggregate(exr ~ da, df,FUN = 'quantile', probs = .99, na.rm = TRUE))%>%
+    rename(Q.99 = exr,
+           DATE = da)
+
+  
+}
+
+```
+
+```{r plot function}
+#sampledatadaily <- read_csv("Q:\\Data-ReadOnly\\CRSP\\dsf_new.csv", n_max = 30000000) %>%
+ # select('DATE', 'PERMNO', 'PRC', 'RET', 'SHROUT', 'VWRETD')
+sampledatadaily <- read_csv("Q:\\Data-ReadOnly\\CRSP\\dsf_new.csv", n_max = 10000000) %>%
+  select('DATE', 'PERMNO','SHRCD', 'HEXCD', 'HSICCD', 'OPENPRC', 'BID', 'ASK', 'BIDLO','ASKHI', 'VOL','RETX', 'PRC', 'RET', 'SHROUT', 'VWRETD')
+# 'SHRCD', 'HEXCD', 'HSICCD', 'OPENPRC', 'BID', 'ASK', 'BIDLO','ASKHI', 'VOL','RETX',
+```
+```{r edit daily data}
+sampledatadaily <- sampledatadaily%>%
+mutate(HEXCD = case_when(HEXCD == 1 ~"NYSE",
+                                HEXCD == 2 ~"NYSE MKT", 
+                                HEXCD == 3 ~"NASDAQ",
+                                HEXCD == 4 ~"Arca",
+                                HEXCD == 5 ~"Other Exchange"))%>%
+  mutate(HSICCD = case_when((HSICCD >= 1 & HSICCD <= 999) ~"Agriculture, Forestry and Fishing",
+                                (HSICCD >= 1000 & HSICCD <= 1499) ~"Mining",
+                                (HSICCD >= 1500 & HSICCD <= 1799) ~"Construction",
+                                (HSICCD >= 2000 & HSICCD <= 3999) ~"Manufacturing",
+                                (HSICCD >= 4000 & HSICCD <= 4999) ~"Transportation and other Utilities",
+                                (HSICCD >= 5000 & HSICCD <= 5199) ~"Wholesale Trade",
+                                (HSICCD >= 5200 & HSICCD <= 5999) ~"Retail Trade",
+                                (HSICCD >= 6000 & HSICCD <= 6799) ~"Finance, Insurance and Real Estate", 
+                                (HSICCD >= 7000 & HSICCD <= 8999) ~"Services",
+                                (HSICCD >= 9000 & HSICCD <= 9999) ~"Public Administration"))%>%
+  mutate(SPREAD = BID-ASK,
+         ClosingPRC = AVERAGE(BID+ASK),
+         Rangehighlow = BIDLO - ASKHI,
+         RangeOpenClose = OPENPRC - ClosingPRC, 
+    MKTCAP = abs(PRC)*SHROUT)%>%
+  mutate(across(-DATE, as.numeric))
+
+```
+```{r compute daily stats descriptive stats}
+stattabledailyreturns <- summarystatsRf(sampledatadaily$RET, sampledatadaily$DATE, sampledatadaily)
+stattabledailyclosingprices <- summarystatsRf(sampledatadaily$ClosingPRC, sampledatadaily$DATE, sampledatadaily)
+stattabledailySpread <- summarystatsRf(sampledatadaily$SPREAD, sampledatadaily$DATE, sampledatadaily)
+stattabledailyvolume <- summarystatsRf(sampledatadaily$VOL, sampledatadaily$DATE, sampledatadaily)
+stattabledailyRangeHL <- summarystatsRf(sampledatadaily$Rangehighlow, sampledatadaily$DATE, sampledatadaily)
+stattabledailyRangeOC <- summarystatsRf(sampledatadaily$RangeOpenClose, sampledatadaily$DATE, sampledatadaily)
+```
+```{r get ranges and daily returns plot}
+stattabledailyreturns%>%
+  mutate(DATE = as.Date(as.character(DATE), '%Y%m%d'))%>%
+  ggplot()+
+  geom_line(aes(x = DATE, y = `average`, color ="average"))+
+  geom_line(aes(x = DATE, y = `SD`, color = "SD"))+
+  geom_line(aes(x = DATE, y = `Q.25`, color ="Q25"))+
+  geom_line(aes(x = DATE, y = `Q.75`, color = "Q75"))+
+  scale_color_manual(name = "Statistics", values = c("average"="hotpink", "SD"="steelblue", "Q25" = "brown1", "Q75" = "cyan"))+
+  labs(x = "Dates", y = "Values", title = "Daily Returns")+
+  theme(plot.title = element_text(hjust = 0.5))+
+            theme(legend.position = "bottom")
+
+stattabledailyRangeHL%>%
+  mutate(DATE = as.Date(as.character(DATE), '%Y%m%d'))%>%
+  ggplot()+
+  geom_line(aes(x = DATE, y = `average`, color ="average"))+
+  geom_line(aes(x = DATE, y = `SD`, color = "SD"))+
+  geom_line(aes(x = DATE, y = `Q.25`, color ="Q25"))+
+  geom_line(aes(x = DATE, y = `Q.75`, color = "Q75"))+
+  scale_color_manual(name = "Statistics", values = c("average"="hotpink", "SD"="steelblue", "Q25" = "brown1", "Q75" = "cyan"))+
+  labs(x = "Dates", y = "Values", title = "Range High Low")+
+  theme(plot.title = element_text(hjust = 0.5))+
+            theme(legend.position = "bottom")
+
+stattabledailyRangeOC%>%
+  mutate(DATE = as.Date(as.character(DATE), '%Y%m%d'))%>%
+  ggplot()+
+  geom_line(aes(x = DATE, y = `average`, color ="average"))+
+  geom_line(aes(x = DATE, y = `SD`, color = "SD"))+
+  geom_line(aes(x = DATE, y = `Q.25`, color ="Q25"))+
+  geom_line(aes(x = DATE, y = `Q.75`, color = "Q75"))+
+  scale_color_manual(name = "Statistics", values = c("average"="hotpink", "SD"="steelblue", "Q25" = "brown1", "Q75" = "cyan"))+
+  labs(x = "Dates", y = "Values", title = "Range Open Close")+
+  theme(plot.title = element_text(hjust = 0.5))+
+            theme(legend.position = "bottom")
+
+
+```
+```{r grab # of IPOS}
+ipodaily <- sampledatadaily%>%
+  left_join(sampledatadaily%>%
+              select(DATE, PERMNO, PRC)%>%
+              filter(!is.na(PRC))%>%
+              select(DATE,PERMNO)%>%
+              group_by(PERMNO)%>%
+              summarise(min(DATE)), by = "PERMNO") %>%
+              mutate(IPO = case_when(`min(DATE)` == DATE ~ 1, TRUE ~ 0))%>%
+              select(DATE, IPO, VWRETD, RET, PRC, SHROUT, PERMNO)%>%
+              mutate(DATE = as.Date(as.character(DATE), '%Y%m%d'))%>%
+              mutate(across(-DATE, as.numeric))
+rm(sampledatadaily)
+```
+```{r get ipo plot}
+ipodaily%>%
+  filter(DATE >= as.Date("1979-01-01"))%>%
+  summarise_by_time(DATE, by = "month", adjusted = sum(IPO))%>%
+  left_join(ipodaily%>%select(DATE, VWRETD), by = "DATE")%>%
+  filter(adjusted != 0)%>%
+  distinct()%>%
+  mutate(VWRETD = VWRETD/.001)%>%
+  ggplot(aes(x=DATE))+
+  geom_line(aes(y = VWRETD))+
+  geom_line(aes(y = adjusted), color = "hotpink")+
+  scale_y_continuous(sec.axis = sec_axis(trans = ~ .*0.001, name = "IPO Market Return"))
+```
+
+
+```{r get ipo plot 2}
+ipodaily%>%
+  filter(DATE >= as.Date("1963-01-01"))%>%
+  summarise_by_time(DATE, by = "month", adjusted = sum(PRC*SHROUT))%>%
+  left_join(ipodaily%>%select(DATE, VWRETD), by = "DATE")%>%
+  filter(adjusted != 0)%>%
+  distinct()%>%
+  mutate(VWRETD = VWRETD*1000)%>%
+  ggplot(aes(x=DATE))+
+  geom_line(aes(y = VWRETD))+
+  geom_line(aes(y = adjusted), color = "hotpink")+
+  scale_y_continuous(sec.axis = sec_axis(trans = ~ .*0.000001, name = "IPO Market Capitalization"))
+```
